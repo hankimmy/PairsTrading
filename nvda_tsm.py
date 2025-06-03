@@ -59,3 +59,18 @@ for r in top5:
         f"Return={res_fine['cum_returns_net'].iloc[-1] * 100:.2f}% | "
         f"Sharpe={res_fine['sharpe_net']:.2f}"
     )
+
+test_prices_x = test_prices['NVDA']
+test_prices_y = test_prices['TSM']
+
+for params in top5:
+    trader_test = RollingPairsTrader(prices_x=test_prices_x, prices_y=test_prices_y,
+                                     entry_threshold=params['entry'],
+                                     exit_threshold=params['exit'],
+                                     transaction_cost=0.001)
+
+    res = trader_test.backtest(params['window'], optimize_thresholds=False)
+    total_return = res['cum_returns_net'].iloc[-1]
+    sharpe = res['sharpe_net']
+    print(f"[OOS] Window={params['window']} | Entry={params['entry']} | Exit={params['exit']} | "
+          f"Return={total_return * 100:.2f}% | Sharpe={sharpe:.2f}")
