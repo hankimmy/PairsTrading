@@ -21,10 +21,20 @@ def _fit_rolling_params(px, py, window):
 
 
 def _calculate_returns(px, py, positions, betas, tc):
-    rets_x, rets_y, betas = px.pct_change().fillna(0), py.pct_change().fillna(0), betas.values
-    strategy_returns = [rets_x.iloc[i] - betas[i]*rets_y.iloc[i] if positions.iloc[i-1]==1
-                        else -rets_x.iloc[i] + betas[i]*rets_y.iloc[i] if positions.iloc[i-1]==-1 else 0
-                        for i in range(1, len(positions))]
+    rets_x = px.pct_change().fillna(0)
+    rets_y = py.pct_change().fillna(0)
+    betas = betas.values
+
+    strategy_returns = []
+    for i in range(1, len(positions)):
+        beta = betas[i - 1]
+        if positions.iloc[i - 1] == 1:
+            strat_ret = rets_x.iloc[i] - beta * rets_y.iloc[i]
+        elif positions.iloc[i - 1] == -1:
+            strat_ret = -rets_x.iloc[i] + beta * rets_y.iloc[i]
+        else:
+            strat_ret = 0
+        strategy_returns.append(strat_ret)
     strategy_returns = pd.Series(strategy_returns, index=px.index[1:])
     position_changes = positions.diff().abs()
     daily_costs = tc * position_changes[1:]

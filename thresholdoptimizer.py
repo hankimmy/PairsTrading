@@ -47,10 +47,11 @@ class ThresholdOptimizer:
         strategy_returns = []
         betas = betas if isinstance(betas, pd.Series) else pd.Series(betas, index=rets_x.index)
         for i in range(1, len(positions)):
+            beta = betas.iloc[i - 1]
             if positions.iloc[i - 1] == 1:
-                strat_ret = rets_x.iloc[i] - betas.iloc[i] * rets_y.iloc[i]
+                strat_ret = rets_x.iloc[i] - beta * rets_y.iloc[i]
             elif positions.iloc[i - 1] == -1:
-                strat_ret = -rets_x.iloc[i] + betas.iloc[i] * rets_y.iloc[i]
+                strat_ret = -rets_x.iloc[i] + beta * rets_y.iloc[i]
             else:
                 strat_ret = 0
             strategy_returns.append(strat_ret)
