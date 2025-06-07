@@ -45,8 +45,7 @@ class RollingPairsTrader:
 
         if optimize_thresholds:
             optimizer = ThresholdOptimizer(**(optimizer_kwargs or {}))
-            result = optimizer.find_optimal_thresholds(zscore, px.pct_change().fillna(0), py.pct_change().fillna(0),
-                                                       betas, self.transaction_cost, regime_mask=regime_mask)
+            result = optimizer.find_optimal_thresholds(zscore, px, py, betas, self.transaction_cost, regime_mask=regime_mask)
             metric_key = optimizer.metric
             positions = result['positions']
             entry_thr = result['entry']

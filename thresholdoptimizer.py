@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from itertools import product
+from helper import generate_positions, calculate_returns
 
 class ThresholdOptimizer:
     def __init__(
@@ -16,70 +17,36 @@ class ThresholdOptimizer:
         self.exit_grid = exit_grid
         self.verbose = verbose
 
-    def generate_positions(self, zscore, entry_threshold, exit_threshold):
-        positions = []
-        in_trade = 0
-        for i in range(len(zscore)):
-            if in_trade == 0:
-                if zscore.iloc[i] > entry_threshold:
-                    positions.append(-1)
-                    in_trade = -1
-                elif zscore.iloc[i] < -entry_threshold:
-                    positions.append(1)
-                    in_trade = 1
-                else:
-                    positions.append(0)
-            elif in_trade == 1:
-                if abs(zscore.iloc[i]) < exit_threshold:
-                    positions.append(0)
-                    in_trade = 0
-                else:
-                    positions.append(1)
-            elif in_trade == -1:
-                if abs(zscore.iloc[i]) < exit_threshold:
-                    positions.append(0)
-                    in_trade = 0
-                else:
-                    positions.append(-1)
-        return pd.Series(positions, index=zscore.index)
-
-    def evaluate(self, positions, rets_x, rets_y, betas, transaction_cost=0.001):
-        strategy_returns = []
-        betas = betas if isinstance(betas, pd.Series) else pd.Series(betas, index=rets_x.index)
-        for i in range(1, len(positions)):
-            beta = betas.iloc[i - 1]
-            if positions.iloc[i - 1] == 1:
-                strat_ret = rets_x.iloc[i] - beta * rets_y.iloc[i]
-            elif positions.iloc[i - 1] == -1:
-                strat_ret = -rets_x.iloc[i] + beta * rets_y.iloc[i]
-            else:
-                strat_ret = 0
-            strategy_returns.append(strat_ret)
-        strategy_returns = pd.Series(strategy_returns, index=rets_x.index[1:])
-        position_changes = positions.diff().abs()
-        daily_costs = transaction_cost * position_changes[1:]
-        strategy_returns_net = strategy_returns - daily_costs
-
+    def evaluate(self, positions, px, py, betas, transaction_cost=0.001):
+        """
+        positions: pd.Series of trading signals (+1, -1, 0)
+        px, py: price series for x and y (not returns)
+        betas: hedge ratio series (pandas Series)
+        transaction_cost: trading cost per position change
+        """
+        result = calculate_returns(px, py, positions, betas, transaction_cost)
+        strategy_returns_net = result['strategy_returns_net']
+        
         if strategy_returns_net.std() == 0 or strategy_returns_net.isnull().all():
             return -np.inf
 
         if self.metric == 'sharpe':
-            return strategy_returns_net.mean() / strategy_returns_net.std() * np.sqrt(252)
+            return result['sharpe_net']
         elif self.metric == 'return':
-            return ((1 + strategy_returns_net).cumprod() - 1).iloc[-1]
-        else:
-            raise ValueError('Unknown metric')
+            return result['cum_returns_net'].iloc[-1]
 
-    def find_optimal_thresholds(self, zscore, rets_x, rets_y, betas, transaction_cost=0.001):
+    def find_optimal_thresholds(self, zscore, rets_x, rets_y, betas, transaction_cost=0.001, regime_mask=None):
         best_value = -np.inf
         best_entry, best_exit = None, None
         best_positions = None
         grid = []
 
         for entry, exit_ in product(self.entry_grid, self.exit_grid):
-            if exit_ >= entry or np.isclose(exit_, entry):
+            if exit_ + 0.2 >= entry or np.isclose(exit_, entry):
                 continue
-            positions = self.generate_positions(zscore, entry, exit_)
+            positions = generate_positions(zscore, entry, exit_)
+            if regime_mask is not None:
+                positions = positions.where(regime_mask, other=0)
             metric_value = self.evaluate(positions, rets_x, rets_y, betas, transaction_cost)
             grid.append({'entry': entry, 'exit': exit_, self.metric: metric_value})
             if self.verbose:
