@@ -1,31 +1,50 @@
 import pandas as pd
 import numpy as np
 
-def generate_positions(zscore, entry_threshold, exit_threshold):
+def generate_positions(zscore, entry_threshold, exit_threshold, stop_z = 3.0):
+    """
+    stop_z: z-score level for stop-loss (e.g. 3.0 = exit if z-score moves 3 stddevs against the trade)
+    """
     positions = []
     in_trade = 0
+    entry_side = 0 
+
     for i in range(len(zscore)):
+        z = zscore.iloc[i]
         if in_trade == 0:
-            if zscore.iloc[i] > entry_threshold:
+            if z > entry_threshold:
                 positions.append(-1)
                 in_trade = -1
-            elif zscore.iloc[i] < -entry_threshold:
+                entry_side = -1
+            elif z < -entry_threshold:
                 positions.append(1)
                 in_trade = 1
+                entry_side = 1
             else:
                 positions.append(0)
-        elif in_trade == 1:
-            if abs(zscore.iloc[i]) < exit_threshold:
+        elif in_trade == 1:  # LONG
+            if abs(z) < exit_threshold:
                 positions.append(0)
                 in_trade = 0
+                entry_side = 0
+            elif z < -stop_z:
+                positions.append(0)
+                in_trade = 0
+                entry_side = 0
             else:
                 positions.append(1)
         elif in_trade == -1:
-            if abs(zscore.iloc[i]) < exit_threshold:
+            if abs(z) < exit_threshold:
                 positions.append(0)
                 in_trade = 0
+                entry_side = 0
+            elif z > stop_z:
+                positions.append(0)
+                in_trade = 0
+                entry_side = 0
             else:
                 positions.append(-1)
+
     return pd.Series(positions, index=zscore.index)
 
 
