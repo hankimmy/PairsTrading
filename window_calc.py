@@ -1,5 +1,6 @@
 from rolling_window import RollingPairsTrader
 import yfinance as yf
+import numpy as np
 
 tickers = ['NVDA', 'TSM']
 prices = yf.download(tickers, start='2024-01-01', end='2025-06-08', auto_adjust=False)['Adj Close'].dropna()
