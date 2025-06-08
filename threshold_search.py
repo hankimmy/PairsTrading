@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
 from itertools import product
-from helper import generate_positions, calculate_returns
+from helper import generate_positions, calculate_returns, fit_rolling_params
 
-class ThresholdOptimizer:
+class ThresholdSearch:
     def __init__(
         self,
         metric='sharpe',
@@ -35,7 +35,7 @@ class ThresholdOptimizer:
         elif self.metric == 'return':
             return result['cum_returns_net'].iloc[-1]
 
-    def find_optimal_thresholds(self, zscore, rets_x, rets_y, betas, transaction_cost=0.001, regime_mask=None):
+    def find_optimal_thresholds(self, zscore, px, py, betas, transaction_cost=0.001, regime_mask=None):
         best_value = -np.inf
         best_entry, best_exit = None, None
         best_positions = None
@@ -47,7 +47,7 @@ class ThresholdOptimizer:
             positions = generate_positions(zscore, entry, exit_)
             if regime_mask is not None:
                 positions = positions.where(regime_mask, other=0)
-            metric_value = self.evaluate(positions, rets_x, rets_y, betas, transaction_cost)
+            metric_value = self.evaluate(positions, px, py, betas, transaction_cost)
             grid.append({'entry': entry, 'exit': exit_, self.metric: metric_value})
             if self.verbose:
                 print(f"Entry={entry:.2f}, Exit={exit_:.2f}, {self.metric.capitalize()}={metric_value:.4f}")

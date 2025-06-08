@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+from statsmodels.tsa.stattools import coint
+import statsmodels.api as sm
 
 def generate_positions(zscore, entry_threshold, exit_threshold, stop_z = 3.0):
     """
@@ -22,7 +24,7 @@ def generate_positions(zscore, entry_threshold, exit_threshold, stop_z = 3.0):
                 entry_side = 1
             else:
                 positions.append(0)
-        elif in_trade == 1:  # LONG
+        elif in_trade == 1:
             if abs(z) < exit_threshold:
                 positions.append(0)
                 in_trade = 0
@@ -80,3 +82,23 @@ def calculate_returns(px, py, positions, betas, tc):
         strategy_returns=strategy_returns,
         strategy_returns_net=strategy_returns_net,
     )
+
+def fit_rolling_params(px, py, window):
+    idx = px.index
+    alphas, betas, means, stds, pvals = [], [], [], [], []
+    for i in range(window, len(px)):
+        X, Y = px.iloc[i - window:i], py.iloc[i - window:i]
+        reg = sm.OLS(X, sm.add_constant(Y)).fit()
+        alpha, beta = reg.params
+        spread = X - (alpha + beta * Y)
+        alphas.append(alpha)
+        betas.append(beta)
+        means.append(spread.mean())
+        stds.append(spread.std())
+        try:
+            _, pval, _ = coint(X, Y)
+        except Exception:
+            pval = 1
+        pvals.append(pval)
+    idx = idx[window:]
+    return pd.Series(alphas, idx), pd.Series(betas, idx), pd.Series(means, idx), pd.Series(stds, idx), pd.Series(pvals, idx)
