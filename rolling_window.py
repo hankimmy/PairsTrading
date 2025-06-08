@@ -33,6 +33,7 @@ class RollingPairsTrader:
             metric = result[metric_key]
         else:
             positions = generate_positions(zscore, entry, exit)
+            regime_mask = regime_mask.reindex(positions.index, fill_value=False)
             positions = positions.where(regime_mask, other=0)
             entry_thr, exit_thr, metric = self.entry_threshold, self.exit_threshold, None
 

@@ -71,8 +71,15 @@ def calculate_returns(px, py, positions, betas, tc):
     strategy_returns_net = strategy_returns - daily_costs
     cum_returns = (1 + strategy_returns).cumprod() - 1
     cum_returns_net = (1 + strategy_returns_net).cumprod() - 1
-    sharpe = strategy_returns.mean() / strategy_returns.std() * np.sqrt(252)
-    sharpe_net = strategy_returns_net.mean() / strategy_returns_net.std() * np.sqrt(252)
+    sharpe = (
+        strategy_returns.mean() / strategy_returns.std() * np.sqrt(252)
+        if strategy_returns.std() > 0 else 0
+    )
+    sharpe_net = (
+        strategy_returns_net.mean() / strategy_returns_net.std() * np.sqrt(252)
+        if strategy_returns_net.std() > 0 else 0
+    )
+
     return dict(
         cum_returns=cum_returns,
         cum_returns_net=cum_returns_net,

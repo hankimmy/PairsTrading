@@ -27,7 +27,7 @@ class SignalsEngine:
     def _load_prices(self, start, end):
         tickers = [self.ticker_x, self.ticker_y]
         print(f"[SignalsEngine] Downloading prices for {tickers} from {start} to {end or 'today'}...")
-        px = yf.download(tickers, start=start, end=end, auto_adjust=False)['Adj Close'].dropna()
+        px = yf.download(tickers, start=start, end=end, auto_adjust=False, progress=False)['Adj Close'].dropna()
         if not all(t in px.columns for t in tickers):
             raise ValueError(f"Could not download both tickers {tickers}: only got {list(px.columns)}")
         self.prices_x = px[self.ticker_x]
@@ -68,7 +68,11 @@ class SignalsEngine:
             raise RuntimeError("Run walkforward_gridsearch() first!")
         df = self.signals_df
         cum_returns = (1 + df['return']).cumprod() - 1
-        sharpe = df['return'].mean() / df['return'].std() * np.sqrt(252)
+        sharpe = (
+            df['return'].mean() / df['return'].std() * np.sqrt(252)
+            if df['return'].std() > 0 else 0
+        )
+
         num_trades = (df['signal'].diff().abs() > 0).sum()
         return {'cum_returns': cum_returns, 'sharpe': sharpe, 'num_trades': num_trades}
 
@@ -104,7 +108,8 @@ class SignalsEngine:
         new_px = yf.download([self.ticker_x, self.ticker_y],
                              start=(last_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d'),
                              end=end_date.strftime('%Y-%m-%d'),
-                             auto_adjust=False)['Adj Close'].dropna()
+                             auto_adjust=False, progress=False)['Adj Close'].dropna()
+        new_px = new_px[new_px.index > last_date]
 
         if new_px.empty:
             print("[update_with_new_price] No new price data available.")
