@@ -5,6 +5,8 @@ import os
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint
 from helper import generate_positions, calculate_returns
+import logging
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 class SignalsEngine:
     def __init__(self, ticker_x, ticker_y, csv_path, start='2023-01-01', end=None,
