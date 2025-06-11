@@ -122,13 +122,19 @@ class SignalsEngine:
 
         all_dates = self.prices_x.index
         missing_dates = all_dates[all_dates > last_date]
+        missing_dates = missing_dates[~missing_dates.duplicated()]
         regime_mask = self.compute_regime_mask(self.prices_x, self.prices_y, self.window)
         results = []
 
         for date in missing_dates:
             try:
-                i = all_dates.get_loc(date)
-                if i < self.window:
+                loc = all_dates.get_loc(date)
+                if isinstance(loc, slice):
+                    i = loc.start
+                else:
+                    i = loc
+
+                if i is None or i < self.window:
                     continue
                 prev_signal = self.signals_df.iloc[-1]['signal'] if len(self.signals_df) > 0 else 0
                 prev_date = all_dates[i - 1]
