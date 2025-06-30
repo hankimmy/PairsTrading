@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-import matplotlib.pyplot as plt
 from threshold_search import ThresholdSearch
 from helper import generate_positions, calculate_returns, fit_rolling_params
 
@@ -14,32 +13,46 @@ class RollingPairsTrader:
         self.transaction_cost = transaction_cost
         self.results = {}
 
-    def backtest(self, window, optimize_thresholds=False, optimizer_kwargs=None, entry=1.0, exit= 0.5,
-                 regime_pval=0.05, vol_window=20, min_vol_thresh=0.5):
-        px, py = self.prices_x, self.prices_y
-        alphas, betas, means, stds, pvals = fit_rolling_params(px, py, window)
-        px, py = px.iloc[window:], py.iloc[window:]
-        spread = px - (alphas + betas * py)
-        zscore = (spread - means) / stds
+    def backtest(self, window,
+                 optimize_thresholds=False, optimizer_kwargs=None,
+                 entry_threshold=None, exit_threshold=None,
+                 regime_pval=0.05):
+        entry_threshold = entry_threshold or self.entry_threshold
+        exit_threshold  = exit_threshold  or self.exit_threshold
+
+        px0, py0 = self.prices_x, self.prices_y
+        alphas, betas, means, stds, pvals = fit_rolling_params(px0, py0, window)
+
+        px, py        = px0.iloc[window:], py0.iloc[window:]
+        alphas_, betas_ = alphas.copy(), betas.copy()
+
+        spread  = px - (alphas_ + betas_ * py)
+        zscore  = (spread - means) / stds
         regime_mask = (pvals < regime_pval)
 
         if optimize_thresholds:
-            optimizer = ThresholdSearch(**(optimizer_kwargs or {}))
-            result = optimizer.find_optimal_thresholds(zscore, px, py, betas, self.transaction_cost, regime_mask=regime_mask)
-            metric_key = optimizer.metric
-            positions = result['positions']
-            entry_thr = result['entry']
-            exit_thr = result['exit']
-            metric = result[metric_key]
+            opt  = ThresholdSearch(**(optimizer_kwargs or {}))
+            res  = opt.find_optimal_thresholds(zscore, px, py,
+                                               betas_, alphas_,
+                                               self.transaction_cost,
+                                               regime_mask=regime_mask)
+            positions = res["positions"]
+            entry_thr = res["entry"]
+            exit_thr  = res["exit"]
+            metric    = res[opt.metric]
         else:
-            positions = generate_positions(zscore, entry, exit)
-            regime_mask = regime_mask.reindex(positions.index, fill_value=False)
-            positions = positions.where(regime_mask, other=0)
-            entry_thr, exit_thr, metric = self.entry_threshold, self.exit_threshold, None
+            positions   = generate_positions(zscore, entry_threshold, exit_threshold)
+            positions   = positions.where(regime_mask.reindex_like(positions), other=0)
+            entry_thr, exit_thr, metric = entry_threshold, exit_threshold, None
 
-        out = calculate_returns(px, py, positions, betas, self.transaction_cost)
-        out.update({'entry_threshold': entry_thr, 'exit_threshold': exit_thr, 'optimized_metric': metric})
-        self.results[f'rolling_{window}_{"opt" if optimize_thresholds else "fixed"}'] = out
+        out = calculate_returns(px, py, positions,
+                                betas_, self.transaction_cost, alphas_)
+        out.update({"entry_threshold": entry_thr,
+                    "exit_threshold":  exit_thr,
+                    "optimized_metric": metric})
+
+        tag = f"rolling_{window}_{'opt' if optimize_thresholds else 'fixed'}"
+        self.results[tag] = out
         return out
 
     def static_backtest(self, entry_threshold, exit_threshold):
@@ -56,6 +69,7 @@ class RollingPairsTrader:
             positions,
             pd.Series(beta, index=self.prices_x.index),
             self.transaction_cost,
+            pd.Series(alpha, index=self.prices_x.index)
         )
         out.update({'alpha': alpha, 'beta': beta, 'mu': mu, 'sigma': sigma})
         self.results['static'] = out
@@ -73,4 +87,5 @@ class RollingPairsTrader:
 
         return calculate_returns(px_test, py_test, posit,
                                  pd.Series(b, index=px_test.index),
-                                 self.transaction_cost)
+                                 self.transaction_cost,
+                                 pd.Series(a, index=px_test.index))

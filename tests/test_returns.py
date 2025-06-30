@@ -2,17 +2,18 @@ import numpy as np
 import pandas as pd
 from helper import calculate_returns
 
+def test_basic_spread_long():
+    px = pd.Series([100, 105], index=pd.date_range("2025-01-01", periods=2))
+    py = pd.Series([50,  51],  index=px.index)
 
-def test_calculate_returns_basic():
-    px = pd.Series([100, 101, 102, 103, 104])
-    py = pd.Series([100, 100, 100, 100, 100])
-    positions = pd.Series([1, 1, 1, 1, 1])
-    betas = pd.Series([0, 0, 0, 0, 0])
-    result = calculate_returns(px, py, positions, betas, tc=0)
+    betas = pd.Series([2, 2], index=px.index)
+    positions = pd.Series([1, 1], index=px.index)
 
-    expected_returns = px.pct_change().fillna(0)[1:]
-    expected_cum = (1 + expected_returns).cumprod() - 1
-    expected_sharpe = expected_returns.mean() / expected_returns.std() * np.sqrt(252)
+    tc = 0.0
 
-    assert np.allclose(result['cum_returns'].values, expected_cum.values)
-    assert np.isclose(result['sharpe'], expected_sharpe)
+    out = calculate_returns(px, py, positions, betas, tc)
+
+    # Day-1 P&L should be   +1 * (3 − 0) = +3
+    assert out["strategy_returns"].iloc[1] == 3.0
+    assert out["cum_pnl"].iloc[-1] == 3.0
+    assert out["positions"].iloc[1] == 1

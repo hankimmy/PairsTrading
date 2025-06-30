@@ -65,7 +65,7 @@ for ticker_x, ticker_y in itertools.combinations(stocks, 2):
 
         for window in windows_to_try:
             try:
-                res = trader.backtest(window=window, entry=entry_threshold, exit=exit_threshold)
+                res = trader.backtest(window=window, entry_threshold=entry_threshold, exit_threshold=exit_threshold)
                 sharpe = res['sharpe_net']
                 ret = res['cum_returns_net'].iloc[-1] * 100
                 num_trades = (res['positions'].diff().abs() > 0).sum()
@@ -84,7 +84,7 @@ for ticker_x, ticker_y in itertools.combinations(stocks, 2):
 
         def score(sharpe, ret, num_trades):
             penalty = 1.0 if num_trades >= 20 else num_trades / 20.0
-            base_score = sharpe + (ret / 25)
+            base_score = sharpe + ret
             return base_score * penalty
 
         top = sorted(filtered_results, key=lambda x: score(x[1], x[2], x[3]), reverse=True)[:3]

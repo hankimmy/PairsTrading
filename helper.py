@@ -50,44 +50,60 @@ def generate_positions(zscore, entry_threshold, exit_threshold, stop_z = 3.0):
     return pd.Series(positions, index=zscore.index)
 
 
-def calculate_returns(px, py, positions, betas, tc):
-    rets_x = px.pct_change().fillna(0)
-    rets_y = py.pct_change().fillna(0)
-    betas = betas.values
+def calculate_returns(px, py, positions, betas, tc, alphas=None):
+    betas  = pd.Series(betas,  index=px.index)
+    alphas = pd.Series(0.0 if alphas is None else alphas, index=px.index)
 
-    strategy_returns = []
-    for i in range(1, len(positions)):
-        beta = betas[i - 1]
-        if positions.iloc[i - 1] == 1:
-            strat_ret = rets_x.iloc[i] - beta * rets_y.iloc[i]
-        elif positions.iloc[i - 1] == -1:
-            strat_ret = -rets_x.iloc[i] + beta * rets_y.iloc[i]
-        else:
-            strat_ret = 0
-        strategy_returns.append(strat_ret)
-    strategy_returns = pd.Series(strategy_returns, index=px.index[1:])
-    position_changes = positions.diff().abs()
-    daily_costs = tc * position_changes[1:]
-    strategy_returns_net = strategy_returns - daily_costs
-    cum_returns = (1 + strategy_returns).cumprod() - 1
-    cum_returns_net = (1 + strategy_returns_net).cumprod() - 1
-    sharpe = (
-        strategy_returns.mean() / strategy_returns.std() * np.sqrt(252)
-        if strategy_returns.std() > 0 else 0
-    )
-    sharpe_net = (
-        strategy_returns_net.mean() / strategy_returns_net.std() * np.sqrt(252)
-        if strategy_returns_net.std() > 0 else 0
-    )
+    # -------- residual & daily P&L (USD) ------------------------------------
+    spread        = px - (alphas + betas * py)
+    spread_change = spread.diff().fillna(0)
 
+    pos_lag       = positions.shift(1).fillna(0)          # trade enters next bar
+    strategy_pnl  = pos_lag * spread_change               # USD per 1-unit spread
+
+    # -------- transaction costs (USD) --------------------------------------
+    gross_notional = px.abs() + (betas.abs() * py.abs())  # $X + $Y per unit
+    units_traded   = positions.diff().abs().fillna(0)     # 0 or 1 (or 2 if flip)
+
+    daily_costs    = tc * gross_notional * units_traded   # cost on both legs
+    strategy_pnl_net = strategy_pnl - daily_costs
+
+    # -------- convert to percentage returns --------------------------------
+    capital_shift = gross_notional.shift(1)               # capital at risk yesterday
+    with np.errstate(divide="ignore", invalid="ignore"):
+        daily_return     = (strategy_pnl     / capital_shift).replace([np.inf, -np.inf], 0).fillna(0)
+        daily_return_net = (strategy_pnl_net / capital_shift).replace([np.inf, -np.inf], 0).fillna(0)
+
+    # -------- cumulatives ---------------------------------------------------
+    cum_pnl         = strategy_pnl.cumsum()
+    cum_pnl_net     = strategy_pnl_net.cumsum()
+    cum_returns     = (1 + daily_return).cumprod()     - 1
+    cum_returns_net = (1 + daily_return_net).cumprod() - 1
+
+    # -------- Sharpe (annualised) ------------------------------------------
+    sharpe = sharpe_net = 0.0
+    if daily_return.std() > 0:
+        sharpe = daily_return.mean() / daily_return.std() * np.sqrt(252)
+    if daily_return_net.std() > 0:
+        sharpe_net = daily_return_net.mean() / daily_return_net.std() * np.sqrt(252)
+
+    # -------- package -------------------------------------------------------
     return dict(
-        cum_returns=cum_returns,
-        cum_returns_net=cum_returns_net,
-        sharpe=sharpe,
-        sharpe_net=sharpe_net,
-        positions=positions,
-        strategy_returns=strategy_returns,
-        strategy_returns_net=strategy_returns_net,
+        # P&L in dollars
+        strategy_pnl        = strategy_pnl,
+        strategy_pnl_net    = strategy_pnl_net,
+        cum_pnl             = cum_pnl,
+        cum_pnl_net         = cum_pnl_net,
+        # percentage returns
+        daily_return        = daily_return,
+        daily_return_net    = daily_return_net,
+        cum_returns         = cum_returns,
+        cum_returns_net     = cum_returns_net,
+        # metrics
+        sharpe              = sharpe,
+        sharpe_net          = sharpe_net,
+        # housekeeping
+        positions           = positions,
     )
 
 def fit_rolling_params(px, py, window):
