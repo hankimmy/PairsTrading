@@ -50,61 +50,56 @@ def generate_positions(zscore, entry_threshold, exit_threshold, stop_z = 3.0):
     return pd.Series(positions, index=zscore.index)
 
 
-def calculate_returns(px, py, positions, betas, tc, alphas=None):
+def calculate_returns(px, py, positions, betas, tc, alphas=None, notional_per_trade=10000):
     betas  = pd.Series(betas,  index=px.index)
     alphas = pd.Series(0.0 if alphas is None else alphas, index=px.index)
 
-    # -------- residual & daily P&L (USD) ------------------------------------
     spread        = px - (alphas + betas * py)
     spread_change = spread.diff().fillna(0)
+    pos_lag       = positions.shift(1).fillna(0)
 
-    pos_lag       = positions.shift(1).fillna(0)          # trade enters next bar
-    strategy_pnl  = pos_lag * spread_change               # USD per 1-unit spread
+    spread_unit_value = px.abs() + (betas.abs() * py.abs())
+    units = notional_per_trade / spread_unit_value.clip(lower=1e-6)
 
-    # -------- transaction costs (USD) --------------------------------------
-    gross_notional = px.abs() + (betas.abs() * py.abs())  # $X + $Y per unit
-    units_traded   = positions.diff().abs().fillna(0)     # 0 or 1 (or 2 if flip)
+    strategy_pnl = (units * pos_lag * spread_change)
 
-    daily_costs    = tc * gross_notional * units_traded   # cost on both legs
+    units_traded = units * positions.diff().abs().fillna(0)
+    daily_costs = tc * spread_unit_value * units_traded
+
     strategy_pnl_net = strategy_pnl - daily_costs
 
-    # -------- convert to percentage returns --------------------------------
-    capital_shift = gross_notional.shift(1)               # capital at risk yesterday
+    capital_shift = (units * spread_unit_value).shift(1)
+
     with np.errstate(divide="ignore", invalid="ignore"):
         daily_return     = (strategy_pnl     / capital_shift).replace([np.inf, -np.inf], 0).fillna(0)
         daily_return_net = (strategy_pnl_net / capital_shift).replace([np.inf, -np.inf], 0).fillna(0)
 
-    # -------- cumulatives ---------------------------------------------------
     cum_pnl         = strategy_pnl.cumsum()
     cum_pnl_net     = strategy_pnl_net.cumsum()
-    cum_returns     = (1 + daily_return).cumprod()     - 1
+    cum_returns     = (1 + daily_return).cumprod() - 1
     cum_returns_net = (1 + daily_return_net).cumprod() - 1
 
-    # -------- Sharpe (annualised) ------------------------------------------
     sharpe = sharpe_net = 0.0
     if daily_return.std() > 0:
         sharpe = daily_return.mean() / daily_return.std() * np.sqrt(252)
     if daily_return_net.std() > 0:
         sharpe_net = daily_return_net.mean() / daily_return_net.std() * np.sqrt(252)
 
-    # -------- package -------------------------------------------------------
     return dict(
-        # P&L in dollars
         strategy_pnl        = strategy_pnl,
         strategy_pnl_net    = strategy_pnl_net,
         cum_pnl             = cum_pnl,
         cum_pnl_net         = cum_pnl_net,
-        # percentage returns
         daily_return        = daily_return,
         daily_return_net    = daily_return_net,
         cum_returns         = cum_returns,
         cum_returns_net     = cum_returns_net,
-        # metrics
         sharpe              = sharpe,
         sharpe_net          = sharpe_net,
-        # housekeeping
         positions           = positions,
+        units               = units,
     )
+
 
 def fit_rolling_params(px, py, window):
     idx = px.index
