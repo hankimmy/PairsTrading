@@ -1,7 +1,12 @@
 sector,ticker_x,ticker_y
 semis,NVDA,ASML
+semis,ASML,LRCX
 biotech,RARE,CRSP
 biotech,NTLA,BLUE
+biotech,VRTX,BIIB
+biotech,VRTX,SRPT
+biotech,ALNY,CRSP
+biotech,SRPT,BLUE
 defense,GD,BA
 ad,APP,MGNI
 ad,TTD,CRM
@@ -9,11 +14,10 @@ ad,PERI,CRM
 ad,ZETA,U
 ad,ZETA,BILI
 ad,ROKU,META
-ad,SNAP,GOOG
+ad,ROKU,CRM
+ad,ZETA,BILI
 cloud,MDB,DOCU
 energy,OXY,EXC
-energy,OXY,XEL
-energy,LNG,NEE
 health,MRK,BMY
 health,ABBV,JNJ
 health,MRK,GILD
@@ -21,3 +25,4 @@ health,ABBV,DXCM
 health,ISRG,DXCM
 retail,TGT,DG
 retail,WMT,EBAY
+tech,GOOGL,AMZN

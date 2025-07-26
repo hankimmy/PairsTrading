@@ -17,7 +17,6 @@ for _, row in best_pairs_df.iterrows():
     ticker_y = row["ticker_y"]
     print(f"\n=== Processing {ticker_x}-{ticker_y} in {sector} sector ===")
 
-    # Load summary CSV for the sector
     summary_path = f"summary/{sector}_summary.csv"
     if not os.path.exists(summary_path):
         print(f"[SKIP] Summary file not found: {summary_path}")
@@ -36,7 +35,6 @@ for _, row in best_pairs_df.iterrows():
     best_window = int(match.iloc[0]["Best_Window"])
     print(f"Using best window: {best_window}")
 
-    # Path to signal CSV for this pair
     signal_csv_path = f"{sector}_signals/{ticker_x}_{ticker_y}.csv"
 
     try:
