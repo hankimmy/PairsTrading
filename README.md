@@ -1,11 +1,9 @@
 Final Return: 1.52%
 P&L: $2,591.87
 
-(returns.png)
+![Cumulative Returns](returns.png)
 
-================================================================================
 SUMMARY STATISTICS FOR BEST PAIRS (2025-04 YTD)
-================================================================================
       Pair  Sector  Return %  Profit $  Max %  Min %  Max DD %
   PERI_CRM      ad     12.76   1276.05  16.28  -0.20      3.52
  ALNY_CRSP biotech      3.43    342.61  23.28  -0.20     19.85
