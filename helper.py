@@ -3,13 +3,10 @@ import numpy as np
 from statsmodels.tsa.stattools import coint
 import statsmodels.api as sm
 
+
 def generate_positions(zscore, entry_threshold, exit_threshold, stop_z = 3.0):
-    """
-    stop_z: z-score level for stop-loss (e.g. 3.0 = exit if z-score moves 3 stddevs against the trade)
-    """
     positions = []
     in_trade = 0
-    entry_side = 0 
 
     for i in range(len(zscore)):
         z = zscore.iloc[i]
@@ -17,89 +14,101 @@ def generate_positions(zscore, entry_threshold, exit_threshold, stop_z = 3.0):
             if z > entry_threshold:
                 positions.append(-1)
                 in_trade = -1
-                entry_side = -1
             elif z < -entry_threshold:
                 positions.append(1)
                 in_trade = 1
-                entry_side = 1
             else:
                 positions.append(0)
         elif in_trade == 1:
             if abs(z) < exit_threshold:
                 positions.append(0)
                 in_trade = 0
-                entry_side = 0
             elif z < -stop_z:
                 positions.append(0)
                 in_trade = 0
-                entry_side = 0
             else:
                 positions.append(1)
         elif in_trade == -1:
             if abs(z) < exit_threshold:
                 positions.append(0)
                 in_trade = 0
-                entry_side = 0
             elif z > stop_z:
                 positions.append(0)
                 in_trade = 0
-                entry_side = 0
             else:
                 positions.append(-1)
 
     return pd.Series(positions, index=zscore.index)
 
 
-def calculate_returns(px, py, positions, betas, tc, alphas=None, notional_per_trade=10000):
-    betas  = pd.Series(betas,  index=px.index)
-    alphas = pd.Series(0.0 if alphas is None else alphas, index=px.index)
+def calculate_returns(
+    px: pd.Series,
+    py: pd.Series,
+    positions: pd.Series,
+    betas: pd.Series,
+    tc: float,
+    alphas: pd.Series,
+    notional_per_trade: float = 10_000.0,
+):
+    df = pd.concat(
+        {"px": px, "py": py, "pos": positions, "beta": betas, "alpha": alphas},
+        axis=1,
+    ).dropna()
+    df = df.sort_index()
 
-    spread        = px - (alphas + betas * py)
-    spread_change = spread.diff().fillna(0)
-    pos_lag       = positions.shift(1).fillna(0)
+    prev_pos = df["pos"].shift(fill_value=0)
+    entry_mask = (prev_pos == 0) & (df["pos"] != 0)
+    exit_mask  = (prev_pos != 0) & (df["pos"] == 0)
 
-    spread_unit_value = px.abs() + (betas.abs() * py.abs())
-    units = notional_per_trade / spread_unit_value.clip(lower=1e-6)
+    entry_idx = df.index[entry_mask]
+    exit_idx  = df.index[exit_mask]
 
-    strategy_pnl = (units * pos_lag * spread_change)
+    pnl = pd.Series(0.0, index=df.index)
+    n_trades = 0
 
-    units_traded = units * positions.diff().abs().fillna(0)
-    daily_costs = tc * spread_unit_value * units_traded
+    for t_entry in entry_idx:
+        future_exits = exit_idx[exit_idx > t_entry]
+        if len(future_exits) == 0:
+            continue
+        t_exit = future_exits[0]
 
-    strategy_pnl_net = strategy_pnl - daily_costs
+        sign = int(df.loc[t_entry, "pos"])  # +1 long spread, -1 short spread
+        beta_entry = float(df.loc[t_entry, "beta"])
 
-    capital_shift = (units * spread_unit_value).shift(1)
+        px_e = float(df.loc[t_entry, "px"])
+        py_e = float(df.loc[t_entry, "py"])
+        px_x = float(df.loc[t_exit,  "px"])
+        py_x = float(df.loc[t_exit,  "py"])
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        daily_return     = (strategy_pnl     / capital_shift).replace([np.inf, -np.inf], 0).fillna(0)
-        daily_return_net = (strategy_pnl_net / capital_shift).replace([np.inf, -np.inf], 0).fillna(0)
+        gross_per_unit_entry = abs(px_e) + abs(beta_entry) * abs(py_e)
+        if gross_per_unit_entry == 0:
+            continue  # degenerate guard
 
-    cum_pnl         = strategy_pnl.cumsum()
-    cum_pnl_net     = strategy_pnl_net.cumsum()
-    cum_returns     = (1 + daily_return).cumprod() - 1
-    cum_returns_net = (1 + daily_return_net).cumprod() - 1
+        u = min(notional_per_trade / gross_per_unit_entry, 1.0)
+        qx =  sign * u
+        qy = -sign * beta_entry * u
 
-    sharpe = sharpe_net = 0.0
-    if daily_return.std() > 0:
-        sharpe = daily_return.mean() / daily_return.std() * np.sqrt(252)
-    if daily_return_net.std() > 0:
-        sharpe_net = daily_return_net.mean() / daily_return_net.std() * np.sqrt(252)
+        leg_pnl = qx * (px_x - px_e) + qy * (py_x - py_e)
 
-    return dict(
-        strategy_pnl        = strategy_pnl,
-        strategy_pnl_net    = strategy_pnl_net,
-        cum_pnl             = cum_pnl,
-        cum_pnl_net         = cum_pnl_net,
-        daily_return        = daily_return,
-        daily_return_net    = daily_return_net,
-        cum_returns         = cum_returns,
-        cum_returns_net     = cum_returns_net,
-        sharpe              = sharpe,
-        sharpe_net          = sharpe_net,
-        positions           = positions,
-        units               = units,
-    )
+        entry_turnover = abs(qx) * px_e + abs(qy) * py_e
+        exit_turnover  = abs(qx) * px_x + abs(qy) * py_x
+        tc_cost = tc * (entry_turnover + exit_turnover)
 
+        realized = leg_pnl - tc_cost
+
+        pnl.loc[t_exit] += realized
+        n_trades += 1
+
+    returns = pnl / float(notional_per_trade)
+    cum_returns = returns.cumsum()
+
+    nz = returns[returns != 0.0]
+    if len(nz) >= 2 and nz.std(ddof=1) > 0:
+        sharpe = nz.mean() / nz.std(ddof=1)
+    else:
+        sharpe = float("nan")
+
+    return pnl, returns, cum_returns, sharpe, n_trades
 
 def fit_rolling_params(px, py, window):
     idx = px.index

@@ -1,278 +1,254 @@
-import os
-import logging
-from pathlib import Path
-from typing   import List
+# signals_engine.py
+from __future__ import annotations
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Dict, Optional, Iterable, Tuple
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import statsmodels.api as sm
-from statsmodels.tsa.stattools import coint
 
-from helper import generate_positions, calculate_returns
 
-logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+@dataclass(frozen=True)
+class EngineConfig:
+    start: str = "2024-01-01"
+    window: int = 120
+    entry_threshold: float = 1.5
+    exit_threshold: float = 0.5
+    min_bars: int = 200
 
 class SignalsEngine:
     def __init__(
         self,
         ticker_x: str,
         ticker_y: str,
-        csv_path: str | Path,
-        *,
-        start: str = "2023-01-01",
-        end: str | None = None,
-        entry_grid: np.ndarray = np.arange(0.5, 2.51, 0.05),
-        exit_grid:  np.ndarray = np.arange(0.05, 1.01, 0.05),
-        window: int = 100,
-        tc: float = 0.001,
-        regime_pval: float = 0.05,
-        stop_z: float = 3.0,
-    ):
-        self.ticker_x, self.ticker_y = ticker_x, ticker_y
-        self.csv_path   = str(csv_path)
-        self.entry_grid = entry_grid
-        self.exit_grid  = exit_grid
-        self.window     = window
-        self.tc         = tc
-        self.regime_pval = regime_pval
-        self.stop_z      = stop_z
-
-        self._load_prices(start, end)
-        self.signals_df: pd.DataFrame | None = None
-        self.process()
-
-    def _load_prices(self, start: str, end: str | None):
-        tickers = [self.ticker_x, self.ticker_y]
-        px = yf.download(
-            tickers, start=start, end=end or None,
-            auto_adjust=False, progress=False
-        )["Adj Close"].dropna()
-
-        if not all(t in px.columns for t in tickers):
-            raise ValueError(f"Could not download both tickers {tickers}")
-
-        self.prices_x = px[self.ticker_x]
-        self.prices_y = px[self.ticker_y]
-
-    def log_signal_row(self, row: dict):
-        """Append one row to the CSV (create if absent)."""
-        file_exists = os.path.exists(self.csv_path)
-        pd.DataFrame([row]).to_csv(
-            self.csv_path, mode="a", header=not file_exists, index=False
+        csv_path: str,
+        start: str = "2024-01-01",
+        window: int = 120,
+        entry_threshold: float = 1.5,
+        exit_threshold: float = 0.5,
+        min_bars: int = 200,
+    ) -> None:
+        self.ticker_x = ticker_x
+        self.ticker_y = ticker_y
+        self.csv_path = csv_path
+        self.cfg = EngineConfig(
+            start=start,
+            window=int(window),
+            entry_threshold=float(entry_threshold),
+            exit_threshold=float(exit_threshold),
+            min_bars=int(min_bars),
         )
 
-    def reload_signals_from_csv(self):
-        self.signals_df = (
-            pd.read_csv(self.csv_path, parse_dates=["date"])
-              .set_index("date")
-              .sort_index()
-        )
+        self._cached_prices: Optional[Tuple[pd.Series, pd.Series]] = None
 
-    def process(self) -> pd.DataFrame:
-        if not os.path.exists(self.csv_path):
-            print("[SignalsEngine] No CSV found → running full walk-forward…")
-            signals = self.walkforward_gridsearch()
-            signals.reset_index().to_csv(self.csv_path, index=False)
-        self.reload_signals_from_csv()
-        self.update_with_new_price()          # pulls any missing days
-        self.reload_signals_from_csv()
-        return self.signals_df
+    def evaluate(self) -> Dict[str, object]:
+        px, py = self._get_prices()
+        results = self._walk_forward(px, py, self.cfg.entry_threshold, self.cfg.exit_threshold)
 
-    def evaluate(self):
-        if self.signals_df is None:
-            raise RuntimeError("No signals yet – run process() first.")
+        daily = results["ret"]
+        equity = (1.0 + daily).cumprod()
+        cum = equity - 1.0
 
-        df = self.signals_df.copy()
-        cum_ret = (1 + df["return"]).cumprod() - 1
-        sharpe  = (
-            df["return"].mean() / df["return"].std() * np.sqrt(252)
-            if df["return"].std() > 0 else 0
-        )
-        n_trades = (df["signal"].diff().abs() > 0).sum()
-        return {"cum_returns": cum_ret, "sharpe": sharpe, "num_trades": n_trades}
+        out = pd.DataFrame({
+            "date": results.index.strftime("%Y-%m-%d"),
+            "signal": results["signal"].astype(int),
+            "entry": np.full(len(results), self.cfg.entry_threshold, dtype=float),
+            "exit":  np.full(len(results), self.cfg.exit_threshold, dtype=float),
+            "sharpe": results["running_sharpe"],
+            "return": daily, # % daily PnL
+            "forced_exit": results["forced_exit"].fillna(False).astype(bool),
+            "px": results["px"], "py": results["py"],
+            "qty_x": results["qty_x"],
+            "qty_y": results["qty_y"],
+            "order_x": results["order_x"],
+            "order_y": results["order_y"],
+        })
+        out.to_csv(self.csv_path, index=False)
 
-    def log_signal_row(self, row):
-        file_exists = os.path.exists(self.csv_path)
-        pd.DataFrame([row]).to_csv(self.csv_path, mode='a', header=not file_exists, index=False)
+        sharpe = float(self._safe_sharpe(daily))
+        num_trades = int((results["entry_flag"] == 1).sum())
 
-    def reload_signals_from_csv(self):
-        self.signals_df = pd.read_csv(self.csv_path, parse_dates=['date']).set_index('date')
+        return {
+            "cum_returns": cum,
+            "daily_returns": daily,
+            "sharpe": sharpe,
+            "num_trades": num_trades
+        }
 
-    def evaluate(self):
-        if self.signals_df is None:
-            raise RuntimeError("Run walkforward_gridsearch() first!")
-        df = self.signals_df
-        cum_returns = (1 + df['return']).cumprod() - 1
-        sharpe = (
-            df['return'].mean() / df['return'].std() * np.sqrt(252)
-            if df['return'].std() > 0 else 0
-        )
 
-        num_trades = (df['signal'].diff().abs() > 0).sum()
-        return {'cum_returns': cum_returns, 'sharpe': sharpe, 'num_trades': num_trades}
+    def grid_search_thresholds(
+        self,
+        entry_grid: Iterable[float],
+        exit_grid: Iterable[float],
+        n_splits: int = 5,
+        min_trades: int = 5,
+        optimize: str = "sharpe",
+        score_weight: float = 1.0,
+    ) -> Dict[str, float]:
+        px, py = self._get_prices()
+        idx = px.index.intersection(py.index)
+        w = self.cfg.window
 
-    def compute_regime_mask(self, px: pd.Series, py: pd.Series, window: int):
-        pvals: List[float] = []
-        for i in range(window, len(px)):
-            try:
-                _, pval, _ = coint(px.iloc[i - window:i], py.iloc[i - window:i])
-            except Exception:
-                pval = 1.0
-            pvals.append(pval)
-        return (pd.Series(pvals, index=px.index[window:]) < self.regime_pval)
+        if len(idx) < max(self.cfg.min_bars, 3 * w):
+            raise ValueError("Not enough data for threshold CV. Increase history or reduce window.")
 
-    def walkforward_gridsearch(self) -> pd.DataFrame:
-        px, py = self.prices_x, self.prices_y
-        regime_mask = self.compute_regime_mask(px, py, self.window)
+        eps = 0.04
+        cand_pairs = [(float(e), float(x)) for e in entry_grid for x in exit_grid if float(x) < float(e) - eps]
+        if not cand_pairs:
+            raise ValueError("Empty candidate set. Ensure exit < entry for at least one pair.")
 
-        rows: list[dict] = []
-        for j in range(self.window, len(px) - 1):
-            prev_sig = rows[-1]["signal"] if rows else 0
-            if not regime_mask.iloc[j - self.window]:
-                row = self._generate_exit_row(px, py, j, prev_sig, forced_exit=True)
+        all_results: dict[Tuple[float, float], pd.DataFrame] = {}
+        for e, x in cand_pairs:
+            all_results[(e, x)] = self._walk_forward(px, py, e, x)[["ret", "entry_flag"]]
+
+        start_pos = np.searchsorted(idx, idx[w])  # ensure indicators warmed
+        split_bounds = np.linspace(start_pos + 1, len(idx), num=n_splits + 1, dtype=int)
+        agg_val_score = {p: 0.0 for p in cand_pairs}
+        for k in range(1, len(split_bounds)):
+            val_start = idx[split_bounds[k - 1]]
+            val_end = idx[split_bounds[k] - 1]
+            train_scores = []
+            for p, df in all_results.items():
+                train_mask = df.index < val_start
+                tr = df.loc[train_mask, "ret"]
+                trades = int(df.loc[train_mask, "entry_flag"].sum())
+                if trades < min_trades or tr.std(ddof=1) == 0 or tr.empty:
+                    score = -np.inf
+                else:
+                    s = self._safe_sharpe(tr)
+                    if optimize == "combo":
+                        s = float(s + score_weight * tr.sum())
+                    score = float(s)
+                train_scores.append((p, score))
+            train_scores.sort(key=lambda t: t[1], reverse=True)
+            best_p = train_scores[0][0]
+            df_best = all_results[best_p]
+            val_mask = (df_best.index >= val_start) & (df_best.index <= val_end)
+            vr = df_best.loc[val_mask, "ret"]
+            if not vr.empty and vr.std(ddof=1) > 0:
+                s_val = self._safe_sharpe(vr)
+                if optimize == "combo":
+                    s_val = float(s_val + score_weight * vr.sum())
             else:
-                row = self._generate_signal_row(px, py, j, prev_sig)
-            rows.append(row)
-            self.log_signal_row(row)
+                s_val = -np.inf
+            agg_val_score[best_p] += float(s_val)
 
-        return pd.DataFrame(rows).set_index("date")
+        winner = max(agg_val_score.items(), key=lambda t: t[1])[0]
+        stitched = []
+        for k in range(1, len(split_bounds)):
+            val_start = idx[split_bounds[k - 1]]
+            val_end = idx[split_bounds[k] - 1]
+            dfw = all_results[winner]
+            vm = (dfw.index >= val_start) & (dfw.index <= val_end)
+            stitched.append(dfw.loc[vm, "ret"])
+        stitched = pd.concat(stitched) if stitched else pd.Series(dtype=float)
+        cv_sharpe = float(self._safe_sharpe(stitched)) if not stitched.empty else float("-inf")
 
-    def update_with_new_price(self):
-        self.reload_signals_from_csv()
-        last_date = self.signals_df.index[-1]
-        print(f"[update] last logged date: {last_date.date()}")
+        return {"entry": winner[0], "exit": winner[1], "cv_sharpe": cv_sharpe}
 
-        today   = pd.Timestamp.today().normalize()
-        new_px  = yf.download(
-            [self.ticker_x, self.ticker_y],
-            start=(last_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-            end  =(today + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-            auto_adjust=False, progress=False,
-        )["Adj Close"].dropna()
+    def _get_prices(self) -> tuple[pd.Series, pd.Series]:
+        if self._cached_prices is not None:
+            return self._cached_prices
+        end = datetime.today().strftime("%Y-%m-%d")
+        data = yf.download([self.ticker_x, self.ticker_y], start=self.cfg.start, end=end, auto_adjust=False, progress=False)
+        if not isinstance(data.columns, pd.MultiIndex):
+            raise ValueError("Unexpected data shape from yfinance. Expected MultiIndex with OHLC fields.")
+        adj = data["Adj Close"].copy()
+        if self.ticker_x not in adj or self.ticker_y not in adj:
+            missing = [t for t in [self.ticker_x, self.ticker_y] if t not in adj]
+            raise ValueError(f"Missing tickers in downloaded data: {missing}")
+        df = adj[[self.ticker_x, self.ticker_y]].dropna().astype(float)
+        df = df.loc[~df.index.duplicated(keep="last")].sort_index()
+        px, py = df[self.ticker_x], df[self.ticker_y]
+        self._cached_prices = (px, py)
+        return px, py
 
-        if new_px.empty:
-            print("[update] nothing new to add.")
-            return
+    def _walk_forward(self, px: pd.Series, py: pd.Series, entry: float, exit: float) -> pd.DataFrame:
+        w = self.cfg.window
+        lx, ly = np.log(px), np.log(py)
 
-        self.prices_x = pd.concat([self.prices_x, new_px[self.ticker_x]]).sort_index()
-        self.prices_y = pd.concat([self.prices_y, new_px[self.ticker_y]]).sort_index()
+        r_mean_x = lx.rolling(w, min_periods=w).mean()
+        r_mean_y = ly.rolling(w, min_periods=w).mean()
+        r_mean_xy = (lx * ly).rolling(w, min_periods=w).mean()
+        r_mean_yy = (ly * ly).rolling(w, min_periods=w).mean()
+        cov_xy = r_mean_xy - r_mean_x * r_mean_y
+        var_y = r_mean_yy - r_mean_y * r_mean_y
+        beta = (cov_xy / var_y).replace([np.inf, -np.inf], np.nan)
 
-        all_dates    = self.prices_x.index
-        missing_idx  = all_dates[all_dates > last_date]
-        regime_mask  = self.compute_regime_mask(self.prices_x, self.prices_y, self.window)
+        spread = lx - beta * ly
+        r_spread_mean = spread.rolling(w, min_periods=w).mean()
+        r_spread_std = spread.rolling(w, min_periods=w).std(ddof=1)
+        z = (spread - r_spread_mean) / r_spread_std
 
-        rows_added = 0
-        for d in missing_idx:
-            i = all_dates.get_loc(d)
-            if isinstance(i, slice):          # safety for pandas >=2.2
-                i = i.start
-            if i is None or i < self.window:
+        signal = np.zeros(len(z), dtype=int)
+        entry_flag = np.zeros(len(z), dtype=int)
+        forced_exit = np.zeros(len(z), dtype=bool)
+        in_pos = 0
+        for i in range(len(z)):
+            zi = z.iat[i]
+            if np.isnan(zi):
+                signal[i] = in_pos
                 continue
-
-            prev_sig = self.signals_df.iloc[-1]["signal"]
-            prev_ok  = regime_mask.iloc[i - self.window]
-            if not prev_ok:
-                row = self._generate_exit_row(self.prices_x, self.prices_y, i - 1, prev_sig, forced_exit=True)
+            if in_pos == 0:
+                if zi <= -entry:
+                    in_pos = 1; entry_flag[i] = 1
+                elif zi >= entry:
+                    in_pos = -1; entry_flag[i] = 1
             else:
-                row = self._generate_signal_row(self.prices_x, self.prices_y, i - 1, prev_sig)
+                if abs(zi) <= exit:
+                    in_pos = 0
+            signal[i] = in_pos
 
-            self.log_signal_row(row)
-            rows_added += 1
+        if signal[-1] != 0:
+            signal[-1] = 0
+            forced_exit[-1] = True
 
-        if rows_added:
-            print(f"[update] appended {rows_added} new rows.")
+        dpx = px.pct_change().fillna(0.0)
+        dpy = py.pct_change().fillna(0.0)
+        beta_lag = beta.shift(1).fillna(0.0)
+        sig_lag = pd.Series(signal, index=px.index).shift(1).fillna(0.0)
+        notional = 1.0 + beta_lag.abs()
+        ret = sig_lag * (dpx - beta_lag * dpy) / notional
+        running_sharpe = self._running_sharpe(ret)
 
-    @staticmethod
-    def _bar_pnl(pos, alpha, beta, px_t, py_t, px_t1, py_t1):
-        eps_t  = px_t  - (alpha + beta * py_t)
-        eps_t1 = px_t1 - (alpha + beta * py_t1)
-        return pos * (eps_t1 - eps_t)
+        # long spread (signal=+1): +1 share X, -beta_lag shares Y
+        # short spread (signal=-1): -1 share X, +beta_lag shares Y
+        qty_x = pd.Series(signal, index=px.index).astype(float)               # ±1 or 0
+        qty_y = (-pd.Series(signal, index=px.index) * beta_lag).astype(float) # ∓β or 0
 
-    def _generate_exit_row(self, px, py, i, prev_signal, forced_exit=False):
-        date = px.index[i + 1]
-        if prev_signal == 0:
-            return {
-                'date': date, 'signal': 0, 'entry': np.nan, 'exit': np.nan,
-                'sharpe': np.nan, 'return': 0, 'forced_exit': False,
-                'px': px.iloc[i + 1], 'py': py.iloc[i + 1]
-            }
+        order_x = qty_x.diff().fillna(qty_x)
+        order_y = qty_y.diff().fillna(qty_y)
 
-        alpha, beta = sm.OLS(px.iloc[i - self.window + 1:i + 1],
-                             sm.add_constant(py.iloc[i - self.window + 1:i + 1])).fit().params
+        results = pd.DataFrame({
+            "px": px, "py": py, "beta": beta, "spread": spread, "z": z,
+            "signal": signal, "entry_flag": entry_flag, "ret": ret,
+            "running_sharpe": running_sharpe, "forced_exit": forced_exit,
+            "qty_x": qty_x, "qty_y": qty_y,
+            "order_x": order_x, "order_y": order_y,
+        }).dropna(subset=["px", "py"])
 
-        bar_pnl  = self._bar_pnl(prev_signal, alpha, beta,
-                                 px.iloc[i],   py.iloc[i],
-                                 px.iloc[i+1], py.iloc[i+1])
+        return results
 
-        gross_notional = abs(px.iloc[i]) + abs(beta * py.iloc[i])
-        tc_cost = 2 * self.tc * gross_notional if prev_signal != 0 else 0
-        bar_pnl_net = bar_pnl - tc_cost
 
-        pct_ret = bar_pnl_net / gross_notional if gross_notional else 0.0
-        return {
-            "date": date,
-            "signal": 0,
-            "entry": np.nan,
-            "exit":  np.nan,
-            "sharpe": np.nan,
-            "return": pct_ret,
-            "forced_exit": forced_exit,
-            "px": px.iloc[i + 1],
-            "py": py.iloc[i + 1],
-        }
+    def _safe_sharpe(self, daily_returns: pd.Series) -> float:
+        r = daily_returns.dropna()
+        if r.empty:
+            return 0.0
+        vol = r.std(ddof=1)
+        if vol == 0 or np.isnan(vol):
+            return 0.0
+        return float(np.sqrt(252) * r.mean() / vol)
 
-    def _generate_signal_row(self, px, py, i, prev_signal):
-        w_px = px.iloc[i - self.window:i]
-        w_py = py.iloc[i - self.window:i]
-        alpha, beta = sm.OLS(w_px, sm.add_constant(w_py)).fit().params
-
-        spread = w_px - (alpha + beta * w_py)
-        z_win  = (spread - spread.mean()) / spread.std()
-
-        best_sharpe = -np.inf
-        best_e, best_x = None, None
-        for e in self.entry_grid:
-            for x in self.exit_grid:
-                if x >= e:
-                    continue
-                pos = generate_positions(z_win, e, x, self.stop_z)
-                stats = calculate_returns(
-                    w_px, w_py, pos,
-                    pd.Series(beta, index=w_px.index),
-                    self.tc,
-                    pd.Series(alpha, index=w_px.index),
-                )
-                if stats["sharpe_net"] > best_sharpe:
-                    best_sharpe, best_e, best_x = stats["sharpe_net"], e, x
-
-        z_now = z_win.iloc[-1]
-        if z_now > best_e:
-            signal = -1
-        elif z_now < -best_e:
-            signal = 1
-        elif abs(z_now) < best_x:
-            signal = 0
-        else:
-            signal = prev_signal
-
-        bar_pnl = self._bar_pnl(prev_signal, alpha, beta,
-                                px.iloc[i],   py.iloc[i],
-                                px.iloc[i+1], py.iloc[i+1])
-
-        gross_notional = abs(px.iloc[i]) + abs(beta * py.iloc[i])
-        if signal != prev_signal:
-            bar_pnl -= 2 * self.tc * gross_notional
-
-        pct_ret = bar_pnl / gross_notional if gross_notional else 0.0
-        return {
-            "date": px.index[i + 1],
-            "signal": signal,
-            "entry":  best_e,
-            "exit":   best_x,
-            "sharpe": best_sharpe,
-            "return": pct_ret,
-            "forced_exit": False,
-            "px": px.iloc[i + 1],
-            "py": py.iloc[i + 1],
-        }
+    def _running_sharpe(self, daily_returns: pd.Series) -> pd.Series:
+        r = daily_returns.fillna(0.0).to_numpy()
+        csum = np.cumsum(r)
+        csum2 = np.cumsum(r * r)
+        n = np.arange(1, len(r) + 1)
+        mean = csum / n
+        var = np.maximum((csum2 - n * mean * mean) / np.maximum(n - 1, 1), 0.0)
+        std = np.sqrt(var)
+        sharpe = np.zeros_like(r)
+        m = std > 0
+        sharpe[m] = np.sqrt(252) * mean[m] / std[m]
+        return pd.Series(sharpe, index=daily_returns.index)
